@@ -1,0 +1,20 @@
+{
+    "name": "ecommerce-shipping",
+    "description": "What a shipment costs and how long it is expected to take.",
+    "version": "0.1.0",
+    "provider": "Liberu\\Ecommerce\\Shipping\\ShippingServiceProvider",
+    "category": "capability",
+    "features": [
+        "Destination zones with explicit precedence and write-time overlap refusal",
+        "Flat and table rates whose bands must tile their axis",
+        "Free shipping above an order subtotal, as a rate rule",
+        "Restrictions that exclude a service level with a recorded reason",
+        "Carrier rating seam with three distinguishable outcomes",
+        "Derived and quoted prices told apart by a stored discriminator",
+        "Integer transit-day delivery estimates with an explicit basis",
+        "Surcharges recorded as separate adjustment lines"
+    ],
+    "requires": {
+        "packages": {}
+    }
+}

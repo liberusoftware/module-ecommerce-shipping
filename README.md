@@ -10,12 +10,94 @@
 ![PHP](https://img.shields.io/badge/PHP-8.5-777BB4?logo=php&logoColor=white) ![Laravel](https://img.shields.io/badge/Laravel-13-FF2D20?logo=laravel&logoColor=white)
 [![Latest release](https://img.shields.io/github/v/release/liberusoftware/module-ecommerce-shipping?sort=semver)](https://github.com/liberusoftware/module-ecommerce-shipping/releases/latest) [![Tests](https://github.com/liberusoftware/module-ecommerce-shipping/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/liberusoftware/module-ecommerce-shipping/actions/workflows/tests.yml)
 
+## What this owns
+
+**Shipping owns what a shipment costs and how long it is expected to take. It
+owns no order, no parcel's contents, no label, and no package in motion.**
+
+Draw the line at the moment of purchase: shipping answers *what will this cost
+and how long will it take*, and everything after the buyer says yes — labels,
+manifests, tracking numbers, carrier pickups, package contents, shipment status
+— is somebody else's.
+
+It imports no sibling module. Catalog owns the product and its weight, so this
+module is **told** its parcels and never looks a weight up. Tax owns whether
+shipping is taxable, so this module emits a price and never computes tax.
+Pricing and promotions own coupons, so "this coupon makes shipping free" is not
+here — see `docs/adoption.md`.
+
+**It does not compute a delivery date.** A date needs a ship date, a cut-off
+time and a holiday calendar this module does not own. It publishes an integer
+transit-day range and the basis those days are counted on, and stops there.
+
 ## Features
 
-- Fully compatible with **Laravel 13**, **PHP 8.5**, and **Pest 5**.
-- Built following the domain-driven design guidelines of the Liberu architecture.
-- Reusable, presenting a clean public contract and boundaries.
-- Adheres to the strict database, security, and authorization standards of Liberu.
+- Destination zones with an explicit precedence, and an ambiguous overlap
+  refused at write time rather than resolved by a read-time sort.
+- Flat and table rates in integer minor units, with bands that must tile their
+  axis and an explicitly declared unbounded top band.
+- Free shipping above an order subtotal, as a rate rule.
+- Restrictions that exclude a service level *with the reason*, so a destination
+  with nothing available is an explicit outcome and not an empty list.
+- A carrier rating seam with four distinguishable outcomes, including "live
+  rating is switched off", which is a configuration and not an error.
+- Derived and quoted prices told apart by a stored discriminator, with a quoted
+  price kept verbatim and never recomputed, adjusted or pruned once selected.
+- Surcharges recorded as their own lines: the charge for a shipment is a fold,
+  and no column anywhere holds a pre-summed total.
+
+## A price is one of two different things
+
+- A **derived** price is computed here from rules this module holds — a zone
+  matched, a rate row applied, a weight band, a free-shipping threshold. It is
+  reproducible from recorded rules, and `tests/Feature/ProofTest.php` reproduces
+  every one of them with the carrier seam ripped out.
+- A **quoted** price is an answer a third party gave at an instant about a
+  future physical movement. It is **irreproducible**: ask again in a minute and
+  the number may differ. So it is stored verbatim with its provenance and
+  survives every rule in this module being deleted — also proved there.
+
+## The two seams
+
+| Contract | Unbound means | Behaviour |
+| --- | --- | --- |
+| `FetchesCarrierRates` | live rating is off for this deployment | derived rates only, stated plainly, no error |
+| `ResolvesParcels` | a deployment fault | fails loudly at the boundary |
+
+`FetchesCarrierRates` answers with one of four types, never a bare list:
+
+| Outcome | Means |
+| --- | --- |
+| `CarrierRatingDisabled` | nothing is bound; live rating is off |
+| `CarrierRatingUnavailable` | a bound carrier threw, timed out or answered with nonsense |
+| `CarrierDoesNotServeDestination` | the carrier answered, and its answer was no |
+| `CarrierRatesReturned` | at least one rate, never constructible empty |
+
+## What this replaces
+
+Twelve faults in the host application (`liberu-ecommerce/ecommerce-laravel`).
+Each is named here with the test that proves it gone. All twelve tests live in
+`tests/Feature/HostFaultsTest.php` unless another file is named.
+
+| # | Host fault | Proof |
+| --- | --- | --- |
+| 1 | A zone is unrepresentable. `shipping_methods` is `name, description, base_rate, weight_rate, max_weight, estimated_delivery_time, is_active` and nothing else; there is no destination column and no zone table anywhere in `app/` or `database/`. | *fault 1: a zone is representable at all* |
+| 2 | The destination is accepted and thrown away. `ShippingService::calculateShippingCost($method, $cart, $address)` threads the address into `calculateDistanceRate()`, whose whole body is `return 0;`, and `isMethodAvailable()` ignores it too. | *fault 2: the destination decides the price instead of being thrown away* |
+| 3 | Rates are floats. `base_rate` and `weight_rate` are `decimal(8,2)` cast to `float`; `shipping_quotes.amount` is re-cast `(float)` at the JSON edge and again at checkout. | *fault 3: rates are integer minor units, never floats* |
+| 4 | Three weight units and no agreement between them: `products.weight` has no unit column, `product_variants.weight_unit` defaults to `kg`, `config('shipping.weight_unit')` defaults to `oz`, and `EasyPostCarrier::parcel()` multiplies by 16 only when the config says `lb`. | *fault 4: there is one weight unit, and it is grams* |
+| 5 | `estimated_delivery_time` is free text, validated only as `required|string|max:255`. | *fault 5: an estimate is an integer day range and a basis, not free text* |
+| 6 | The evidence for a charged price is deleted on a schedule: `PruneShippingQuotes` deletes on `expires_at` alone, and `orders.shipping_quote_id` is nulled on delete — for a number the migration's own docblock says cannot be recomputed. | *fault 6: the evidence for a charged price is never pruned* |
+| 7 | Every failure mode is the same empty array: a missing API key, a non-2xx response, any `Throwable`, and no carrier configured all return `[]`, and checkout silently bills a flat rate instead. | *fault 7: every carrier failure mode is its own answer, not one empty array* |
+| 8 | A config float is added to an authoritative stored quote: `round((float) $quote->amount + $premium, 2)`, leaving `orders.shipping_cost` equal to no quote anyone ever fetched. | *fault 8: a premium is a recorded line, never added to a stored quote* |
+| 9 | Parcels have no dimensions. `getLiveRates()` builds `['weight' => …]` and `EasyPostCarrier::parcel()` `array_filter`s the dimensions out because no caller supplies them. | *fault 9: a parcel can express a box* |
+| 10 | A missing weight is silently zero: `(float) ($item['weight'] ?? $weights[$productId] ?? 0)`, over a `decimal(8,2)->default(0)` column. | *fault 10: a missing weight is refused, not silently zero* |
+| 11 | `verifyAddress()` calls `https://api.address-verifier.com` with a key defined nowhere, from a method with no caller. | *fault 11: there is no address-verification stub pointing at a placeholder host* |
+| 12 | A quote's authorisation predicate is `session_id = $sessionId` **OR** `user_id = $userId`, with `''` passed by one caller and the literal `'api'` passed for every headless buyer. There is no tenant column at all. | *fault 12: who may spend a price is the tenant, not a client-adjacent string* |
+
+Two things the host got right are kept: persisting a fetched carrier rate and
+billing the stored amount, and falling back to flat rates when live rating is
+unavailable. Fault 7 is that the fallback was silent and undifferentiated, not
+that it exists.
 
 ## Requirements
 
@@ -25,14 +107,19 @@
 
 ## Quick start
 
-To install this package via Composer, run:
-
 ```bash
-composer require liberusoftware/module-ecommerce-shipping
+composer require liberusoftware/ecommerce-shipping
 ```
+
+The package registers nothing on install: `extra.laravel.providers` is empty by
+design, and the host enables the module through `MODULES_ENABLED`. Bind
+`ResolvesParcels` before quoting anything — see `docs/adoption.md`.
 
 ## Documentation
 
+- [`docs/domain.md`](docs/domain.md) — the model, the public surface, and the known limits.
+- [`docs/adoption.md`](docs/adoption.md) — migrating a host off the tables and behaviour this replaces.
+- [`docs/runbook.md`](docs/runbook.md) — operating it: sweeping, degraded carriers, and what to do when a price looks wrong.
 - [Liberu Main Documentation](https://github.com/liberusoftware/documentation)
 - [Architecture & Standards Index](https://github.com/liberusoftware/documentation/tree/main/architecture)
 
